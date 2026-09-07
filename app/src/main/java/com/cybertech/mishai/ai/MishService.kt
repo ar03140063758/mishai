@@ -12,7 +12,11 @@ import android.content.pm.PackageManager
 import android.graphics.PixelFormat
 import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
+import android.provider.Settings
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
@@ -27,6 +31,7 @@ import com.cybertech.mishai.MishBackend
 import com.cybertech.mishai.MishServiceBridge
 import com.cybertech.mishai.Mood
 import com.cybertech.mishai.R
+import kotlin.math.sin
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -38,12 +43,15 @@ import java.util.Locale
 
 /**
  * Foreground service that:
- *  1) listens for the wake word "Mish" (and variations mish/meesh/mishi)
+ *  1) listens for the wake word "Mish" (and variations) using on-device
+ *     speech recognition so it works from any app / background
  *  2) once triggered, activates AI conversation via MishBackend
- *  3) shows a floating overlay animation with the conversation bubble
+ *  3) shows a Siri-like floating animation (breathing circle) at all times
  *
- * Runs in background even when app is closed, so "Mish" activates instantly
- * from any screen or app.
+ * Notes:
+ *  - Wake listening uses "en-US" because "Mish" is recognised reliably there
+ *    on every device; "ur-PK" is unavailable on most phones.
+ *  - A wakelock keeps the mic+sensor alive even when the screen is on/off.
  */
 class MishService : Service(), RecognitionListener {
 
@@ -65,18 +73,23 @@ class MishService : Service(), RecognitionListener {
 
     private val job = SupervisorJob()
     private val scope = CoroutineScope(Dispatchers.Main + job)
+    private val uiHandler = Handler(Looper.getMainLooper())
 
     private lateinit var prefs: PreferencesManager
     private lateinit var backend: MishBackend
 
     private var speechRecognizer: SpeechRecognizer? = null
     private var listeningSession = false
+    private var conversationActive = false
     private var overlayAdded = false
     private var overlayView: View? = null
     private var waveView: View? = null
+    private var ringView: View? = null
     private var bubbleText: TextView? = null
     private var triggerJob: Job? = null
+    private var errorBackoffMs = 800L
     private var currentMaxAmp = 0f
+    private var wakeLock: PowerManager.WakeLock? = null
 
     // TTS
     private var ttsEngine: android.speech.tts.TextToSpeech? = null
@@ -87,42 +100,74 @@ class MishService : Service(), RecognitionListener {
         backend = MishBackend(this)
         ttsEngine = android.speech.tts.TextToSpeech(applicationContext) { status ->
             if (status == android.speech.tts.TextToSpeech.SUCCESS) {
-                val langRes = ttsEngine?.setLanguage(Locale.UK)
-                // allow any fallback; do not error
-                if (langRes == android.speech.tts.TextToSpeech.LANG_MISSING_DATA
-                    || langRes == android.speech.tts.TextToSpeech.LANG_NOT_SUPPORTED
-                ) {
-                    // fallback to English
-                }
+                ttsEngine?.setLanguage(Locale.UK)
             }
         }
         createChannel()
+        acquireWakeLock()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_STOP -> {
-                stopSelf()
+                stopMish()
                 return START_NOT_STICKY
             }
         }
 
         isRunning = true
         startForeground(NOTIFICATION_ID, buildNotification())
+        // Show Siri-like animation immediately so the user sees Mish is alive.
+        showOverlay("Mish sun rahi hai... 'Mish' bolo")
         startWakeWordListening()
-
         return START_STICKY
     }
 
     override fun onDestroy() {
+        stopMish()
+        super.onDestroy()
+    }
+
+    private fun stopMish() {
         isRunning = false
-        scope.cancel()
+        triggerJob?.cancel()
+        triggerJob = null
+        removeOverlay()
         speechRecognizer?.destroy()
         speechRecognizer = null
         ttsEngine?.stop()
         ttsEngine?.shutdown()
-        removeOverlay()
-        super.onDestroy()
+        releaseWakeLock()
+    }
+
+    // ---------- Wake lock (keeps mic live even when screen off) ----------
+    private fun acquireWakeLock() {
+        try {
+            val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+            wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "MishAI::wake")
+            wakeLock?.setReferenceCounted(false)
+            wakeLock?.acquire(10 * 60 * 1000L)
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    private fun releaseWakeLock() {
+        try {
+            if (wakeLock?.isHeld == true) wakeLock?.release()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+        wakeLock = null
+    }
+
+    private fun refreshWakeLock() {
+        try {
+            if (wakeLock?.isHeld == true) wakeLock?.release()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+        acquireWakeLock()
     }
 
     // ---------- Foreground notification ----------
@@ -161,17 +206,19 @@ class MishService : Service(), RecognitionListener {
             .build()
     }
 
-    // ---------- Wake word detection ----------
+    // ---------- Wake word detection (en-US, reliable on all devices) ----------
     private fun startWakeWordListening() {
         if (listeningSession) return
-        listeningSession = true
+        refreshWakeLock()
         startRecognition(
+            language = "en-US",
             onStart = {},
             onResult = { text ->
+                errorBackoffMs = 800L
                 val t = text.lowercase(Locale.getDefault())
                 val wake = WAKE_WORDS.any { t.contains(it) }
                 if (wake) {
-                    showOverlay()
+                    updateBubble("Haan! Mish yahan hai 🙂")
                     triggerJob = scope.launch {
                         delay(250)
                         eligibleForConversation()
@@ -181,14 +228,16 @@ class MishService : Service(), RecognitionListener {
                 }
             },
             onError = {
-                scheduleRestart()
+                scope.launch {
+                    delay(errorBackoffMs)
+                    errorBackoffMs = (errorBackoffMs * 1.6f).toLong().coerceAtMost(4000L)
+                    if (!conversationActive) startWakeWordListening()
+                }
             }
         )
     }
 
     // ---------- Conversation capture ----------
-    private var conversationActive = false
-
     private fun eligibleForConversation() {
         if (conversationActive) return
         conversationActive = true
@@ -200,7 +249,9 @@ class MishService : Service(), RecognitionListener {
     }
 
     private fun startCaptureConversation() {
+        errorBackoffMs = 800L
         startRecognition(
+            language = "en-US",
             onStart = {},
             onResult = { text ->
                 if (text.isBlank()) {
@@ -217,7 +268,10 @@ class MishService : Service(), RecognitionListener {
                     EmergencyHelper.openCall(this, profile.emergencyNumber)
                     speak("Emergency alert bhej diya hai, saath mein call ho rahi hai.")
                     conversationActive = false
-                    scheduleRestart(3000)
+                    scope.launch {
+                        delay(3000)
+                        startWakeWordListening()
+                    }
                     return@startRecognition
                 }
 
@@ -253,17 +307,22 @@ class MishService : Service(), RecognitionListener {
         ttsEngine?.speak(text, android.speech.tts.TextToSpeech.QUEUE_FLUSH, null, "mish_reply")
     }
 
-    // ---------- Shared recognition helper (wake + capture) ----------
-    private var currentOnResult: ((String) -> Unit)? = null
+    // ---------- Shared recognition helper ----------
     private var currentOnStart: (() -> Unit)? = null
+    private var currentOnResult: ((String) -> Unit)? = null
     private var currentOnError: (() -> Unit)? = null
 
     private fun startRecognition(
+        language: String,
         onStart: () -> Unit,
         onResult: (String) -> Unit,
         onError: () -> Unit
     ) {
         try {
+            if (!SpeechRecognizer.isRecognitionAvailable(this)) {
+                currentOnError?.invoke()
+                return
+            }
             val rec = SpeechRecognizer.createSpeechRecognizer(this)
             if (speechRecognizer != null && speechRecognizer !== rec) {
                 speechRecognizer?.destroy()
@@ -276,23 +335,15 @@ class MishService : Service(), RecognitionListener {
 
             val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
                 putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-                putExtra(RecognizerIntent.EXTRA_LANGUAGE, "ur-PK")
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE, language)
                 putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 1200)
-                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 300)
-                putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+                putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
+                putExtra("android.speech.extra.DICTATION_MODE", true)
             }
             rec.setRecognitionListener(this)
             rec.startListening(intent)
         } catch (e: Exception) {
             currentOnError?.invoke()
-        }
-    }
-
-    private fun scheduleRestart(delayMs: Long = 1500) {
-        scope.launch {
-            delay(delayMs)
-            startWakeWordListening()
         }
     }
 
@@ -323,15 +374,13 @@ class MishService : Service(), RecognitionListener {
         currentOnError?.invoke()
     }
 
-    // ---------- Overlay (floating animation) ----------
+    // ---------- Siri-like floating animation ----------
     @SuppressLint("InflateParams")
-    private fun showOverlay() {
-        if (overlayAdded || Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return
-        val hasOverlayPermission = packageManager.checkPermission(
-            "android.permission.SYSTEM_ALERT_WINDOW",
-            packageName
-        ) == PackageManager.PERMISSION_GRANTED
-        if (!hasOverlayPermission) {
+    private fun showOverlay(bubble: String) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return
+        if (!Settings.canDrawOverlays(this)) return
+        if (overlayAdded) {
+            bubbleText?.text = bubble
             return
         }
 
@@ -341,6 +390,8 @@ class MishService : Service(), RecognitionListener {
             val view = li.inflate(R.layout.overlay_mish, null)
             bubbleText = view.findViewById(R.id.bubble_text)
             waveView = view.findViewById(R.id.wave_view)
+            ringView = view.findViewById(R.id.ring_view)
+            bubbleText?.text = bubble
 
             val params = WindowManager.LayoutParams(
                 WindowManager.LayoutParams.WRAP_CONTENT,
@@ -354,35 +405,53 @@ class MishService : Service(), RecognitionListener {
                 PixelFormat.TRANSLUCENT
             ).apply {
                 gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
-                y = 220
+                y = 240
             }
             wm.addView(view, params)
             overlayAdded = true
             overlayView = view
-            animateWave()
+            startPulseAnimation()
         } catch (e: Exception) {
             overlayAdded = false
         }
     }
 
-    private fun animateWave() {
-        val w = waveView ?: return
-        val anim = w.animate()
-            .scaleX(1.12f).scaleY(1.12f).setDuration(650).withLayer()
-            .withEndAction {
-                w.animate().scaleX(1f).scaleY(1f).setDuration(650).withLayer()
-                    .withEndAction { if (overlayAdded) animateWave() }
-                    .start()
-            }
-        anim.start()
+    /** Breathing Siri-like pulse: core circle + expanding halo ring. */
+    private var pulsePhase = 0f
+    private val pulseRunnable = object : Runnable {
+        override fun run() {
+            if (!overlayAdded) return
+            pulsePhase += 0.12f
+            val core = 1f + 0.15f * sin(pulsePhase)
+            waveView?.scaleX = core
+            waveView?.scaleY = core
+
+            val halo = 0.9f + 0.3f * sin(pulsePhase + 1.2f)
+            ringView?.scaleX = halo
+            ringView?.scaleY = halo
+            ringView?.alpha = (0.25f + 0.2f * (0.5f + 0.5f * sin(pulsePhase + 1.2f)))
+                .coerceIn(0f, 1f)
+
+            waveView?.postDelayed(this, 50)
+        }
+    }
+
+    private fun startPulseAnimation() {
+        uiHandler.removeCallbacks(pulseRunnable)
+        pulsePhase = 0f
+        waveView?.post(pulseRunnable)
     }
 
     private fun updateBubble(text: String) {
         bubbleText?.text = text
+        bubbleText?.postDelayed({
+            if (overlayAdded) bubbleText?.text = "Mish sun rahi hai..."
+        }, 5000)
     }
 
     private fun removeOverlay() {
         if (!overlayAdded) return
+        uiHandler.removeCallbacks(pulseRunnable)
         try {
             val wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
             overlayView?.let { wm.removeView(it) }
@@ -391,6 +460,9 @@ class MishService : Service(), RecognitionListener {
         }
         overlayAdded = false
         overlayView = null
+        waveView = null
+        ringView = null
+        bubbleText = null
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
