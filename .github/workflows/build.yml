@@ -1,11 +1,12 @@
-name: Build APK
+name: Build & Release APK
 
 on:
   push:
-    branches: [ main ]
-  pull_request:
-    branches: [ main ]
+    branches: [ master ]
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -26,11 +27,64 @@ jobs:
       - name: Make gradlew executable
         run: chmod +x gradlew
 
-      - name: Build debug APK
-        run: ./gradlew assembleDebug --no-daemon
+      - name: Generate signing keystore
+        run: |
+          keytool -genkeypair -v \
+            -keystore mishai-keystore.jks \
+            -storepass mishai123 \
+            -alias mishai \
+            -keypass mishai123 \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -dname "CN=Mish AI, OU=CyberTechAgency, O=CyberTechAgency, L=Lahore, S=Punjab, C=PK"
 
-      - name: Upload APK artifact
+      - name: Build signed release APK
+        run: ./gradlew assembleRelease --no-daemon
+        env:
+          KEYSTORE_PATH: mishai-keystore.jks
+          KEYSTORE_PASSWORD: mishai123
+          KEY_ALIAS: mishai
+          KEY_PASSWORD: mishai123
+
+      - name: List APK outputs
+        run: ls -la app/build/outputs/apk/release/
+
+      - name: Upload APK as workflow artifact
         uses: actions/upload-artifact@v4
         with:
           name: mish-ai-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
+          path: app/build/outputs/apk/release/app-release.apk
+          if-no-files-found: error
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: Mish AI v1.0 (Build ${{ github.run_number }})
+          body: |
+            ## Mish AI — Download & Install
+
+            **Developed by Cyber Tech Agency** • CEO & Developer: Mehar Ahmad Raza
+
+            ### How to install (Android 7+)
+            1. Tap **MishAI.apk** below.
+            2. Choose **Download** then open the file.
+            3. If prompted, allow "Install unknown apps" for your browser/files app.
+            4. Tap **Install** → **Open**.
+
+            Works on Android 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 and above.
+
+            ### Features
+            - Wake word **"Mish"** — instant female voice AI (Roman Urdu / Urdu)
+            - Real-time Siri-style chat with mood detection
+            - Camera vision (Mish describes what it sees)
+            - Emergency: say "help" / "bachao" → auto SMS + live location
+            - Works in background, 100% online, free
+
+            ### Contact
+            - Website: https://www.cybertechagency.com/mish
+            - Facebook: https://facebook.com/cybertechagencyy
+            - YouTube: https://youtube.com/@cybertechagency
+            - WhatsApp / Call: +92 322 4278925
+          files: |
+            app/build/outputs/apk/release/app-release.apk
+            app/build/outputs/apk/release/app-release-unsigned.apk
