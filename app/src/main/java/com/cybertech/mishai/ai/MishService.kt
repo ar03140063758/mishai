@@ -31,6 +31,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.util.Locale
@@ -52,7 +53,7 @@ class MishService : Service(), RecognitionListener {
         const val ACTION_START = "com.cybertech.mishai.START"
         const val ACTION_STOP = "com.cybertech.mishai.STOP"
 
-        private const val WAKE_WORDS = listOf("mish", "meesh", "mishi", "mishy", "mitch", "mishai", "meysh")
+        private val WAKE_WORDS = listOf("mish", "meesh", "mishi", "mishy", "mitch", "mishai", "meysh")
 
         var isRunning = false
             private set
@@ -176,7 +177,7 @@ class MishService : Service(), RecognitionListener {
                         eligibleForConversation()
                     }
                 } else {
-                    if (!conversationActive) startRecognition()
+                    if (!conversationActive) startWakeWordListening()
                 }
             },
             onError = {
@@ -220,17 +221,26 @@ class MishService : Service(), RecognitionListener {
                     return@startRecognition
                 }
 
-                backend.ask(text, currentMaxAmp) { reply ->
-                    runOnMain {
-                        updateBubble(reply.text)
-                        MishServiceBridge.onMishReply?.invoke(reply.text, reply.mood)
-                        onMishReply?.invoke(reply.text, reply.mood)
-                        speak(reply.text)
-                        conversationActive = false
-                        // After finishing reply, go back to wake-word mode
-                        startWakeWordListening()
+                backend.ask(text, currentMaxAmp, object : MishBackend.CallbackResult {
+                    override fun onSuccess(reply: MishBackend.MishReply) {
+                        runOnMain {
+                            updateBubble(reply.text)
+                            MishServiceBridge.onMishReply?.invoke(reply.text, reply.mood)
+                            onMishReply?.invoke(reply.text, reply.mood)
+                            speak(reply.text)
+                            conversationActive = false
+                            startWakeWordListening()
+                        }
                     }
-                }
+
+                    override fun onError(error: String) {
+                        runOnMain {
+                            speak("Kuch ghalti hui, dobara kaho.")
+                            conversationActive = false
+                            startWakeWordListening()
+                        }
+                    }
+                })
             },
             onError = {
                 conversationActive = false
@@ -264,15 +274,14 @@ class MishService : Service(), RecognitionListener {
             currentOnError = onError
             listeningSession = true
 
-            val intent = RecognizerIntent()
-                .apply {
-                    putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-                    putExtra(RecognizerIntent.EXTRA_LANGUAGE, "ur-PK")
-                    putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-                    putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 1200)
-                    putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 300)
-                    putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
-                }
+            val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE, "ur-PK")
+                putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 1200)
+                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 300)
+                putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+            }
             rec.setRecognitionListener(this)
             rec.startListening(intent)
         } catch (e: Exception) {

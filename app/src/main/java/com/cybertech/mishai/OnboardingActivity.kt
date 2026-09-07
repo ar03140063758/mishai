@@ -99,6 +99,7 @@ private fun OnboardingScreen(
     onOverlayRequest: () -> Unit
 ) {
     val roles = listOf("boss", "sir", "madam", "maam", "bhai", "jani", "jan", "yar")
+    val currentContext = androidx.compose.ui.platform.LocalContext.current
 
     var step by remember { mutableStateOf(1) }
     var name by remember { mutableStateOf("") }
@@ -237,9 +238,7 @@ private fun OnboardingScreen(
                 Spacer(Modifier.height(24.dp))
                 Button(
                     onClick = {
-                        val prefs = PreferencesManager(
-                            androidx.compose.ui.platform.LocalContext.current
-                        )
+                        val prefs = PreferencesManager(currentContext)
                         val profile = prefs.loadProfile()
                         prefs.saveProfile(
                             profile.copy(
