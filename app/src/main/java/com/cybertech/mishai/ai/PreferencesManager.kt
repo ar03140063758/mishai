@@ -18,6 +18,10 @@ private val Context.dataStore by preferencesDataStore(name = "mish_prefs")
  */
 class PreferencesManager(private val context: Context) {
 
+    companion object {
+        const val DEFAULT_ENDPOINT = "https://mish-backend.vercel.app/ask"
+    }
+
     private object Keys {
         val NAME = stringPreferencesKey("user_name")
         val ROLE = stringPreferencesKey("user_role")
@@ -54,6 +58,7 @@ class PreferencesManager(private val context: Context) {
 
     fun getEndpoint(): String? = runBlocking {
         context.dataStore.data.first()[Keys.ENDPOINT]
+            ?: DEFAULT_ENDPOINT
     }
 
     fun setEndpoint(url: String) {
