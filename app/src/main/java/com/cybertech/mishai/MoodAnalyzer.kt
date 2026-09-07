@@ -47,7 +47,7 @@ object MoodAnalyzer {
         // Anger keywords dominate — always prioritize avoiding misses
         if (containsAny(t, angryWords)) return Mood.ANGRY
         if (containsAny(t, tiredWords)) return Mood.TIRED
-        if (containsAny(t, stressedWords)) return Mood.SPRESSED
+        if (containsAny(t, stressedWords)) return Mood.STRESSED
         if (containsAny(t, confusedWords)) return Mood.CONFUSED
         if (containsAny(t, sadWords)) return Mood.SAD
         if (containsAny(t, excitedWords)) return Mood.EXCITED
