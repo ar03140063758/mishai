@@ -30,7 +30,7 @@ jobs:
       - name: Generate signing keystore
         run: |
           keytool -genkeypair -v \
-            -keystore mishai-keystore.jks \
+            -keystore app/mishai-keystore.jks \
             -storepass mishai123 \
             -alias mishai \
             -keypass mishai123 \
@@ -87,4 +87,3 @@ jobs:
             - WhatsApp / Call: +92 322 4278925
           files: |
             app/build/outputs/apk/release/app-release.apk
-            app/build/outputs/apk/release/app-release-unsigned.apk
