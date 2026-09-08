@@ -1,5 +1,6 @@
 package com.cybertech.mishai.ai
 
+import android.Manifest
 import android.annotation.SuppressLint
 import android.app.Notification
 import android.app.NotificationChannel
@@ -10,27 +11,34 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.PixelFormat
+import android.media.AudioFormat
+import android.media.AudioManager
+import android.media.AudioRecord
+import android.media.MediaRecorder
 import android.os.Build
 import android.os.Bundle
-import android.os.PowerManager
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.PowerManager
 import android.provider.Settings
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.view.Gravity
 import android.view.LayoutInflater
+import android.view.MotionEvent
+import android.view.ScaleGestureDetector
 import android.view.View
 import android.view.WindowManager
-import android.widget.TextView
 import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
 import com.cybertech.mishai.MainActivity
 import com.cybertech.mishai.MishBackend
 import com.cybertech.mishai.MishServiceBridge
 import com.cybertech.mishai.Mood
 import com.cybertech.mishai.R
+import kotlin.math.abs
 import kotlin.math.sin
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -38,20 +46,22 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.util.Locale
 
 /**
  * Foreground service that:
- *  1) listens for the wake word "Mish" (and variations) using on-device
- *     speech recognition so it works from any app / background
- *  2) once triggered, activates AI conversation via MishBackend
- *  3) shows a Siri-like floating animation (breathing circle) at all times
+ *  1) runs a REAL continuous microphone stream via AudioRecord with a custom
+ *     Voice Activity Detector (VAD) so the mic never "turns off" on small sounds.
+ *  2) only forwards captured speech to SpeechRecognizer when VAD confirms the user
+ *     is actually speaking (above silence threshold for a minimum duration).
+ *  3) after Mish replies, automatically returns to listening (no manual retrigger).
+ *  4) shows a floating, draggable + resizable, state-reactive orb.
  *
- * Notes:
- *  - Wake listening uses "en-US" because "Mish" is recognised reliably there
- *    on every device; "ur-PK" is unavailable on most phones.
- *  - A wakelock keeps the mic+sensor alive even when the screen is on/off.
+ *  Orb states: IDLE / LISTENING / THINKING / SPEAKING
+ *  - Listening: reacts to live microphone amplitude
+ *  - Speaking : reacts to TTS playback while the assistant talks
  */
 class MishService : Service(), RecognitionListener {
 
@@ -61,65 +71,73 @@ class MishService : Service(), RecognitionListener {
         const val ACTION_START = "com.cybertech.mishai.START"
         const val ACTION_STOP = "com.cybertech.mishai.STOP"
 
-        private val WAKE_WORDS = listOf("mish", "meesh", "mishi", "mishy", "mitch", "mishai", "meysh")
-
         var isRunning = false
             private set
 
-        /** Hook used by the Compose UI to receive spoken text events. */
         var onUserSpeech: ((String) -> Unit)? = null
         var onMishReply: ((String, Mood) -> Unit)? = null
+
+        // UI reads the orb state + amplitude for transparency
+        @Volatile var orbState: OrbState = OrbState.IDLE
+        @Volatile var orbAmplitude: Float = 0f
+
+        enum class OrbState { IDLE, LISTENING, THINKING, SPEAKING }
     }
+
+    // Orb position/size persistence (in px, relative to screen)
+    private val prefsForOrb get() = PreferencesManager(this)
+    private var orbX = 0
+    private var orbY = 0
+    private var orbSizePx = 90f
 
     private val job = SupervisorJob()
     private val scope = CoroutineScope(Dispatchers.Main + job)
     private val uiHandler = Handler(Looper.getMainLooper())
 
-    private lateinit var prefs: PreferencesManager
-    private lateinit var backend: MishBackend
-
-    private var speechRecognizer: SpeechRecognizer? = null
-    private var listeningSession = false
-    private var conversationActive = false
-    private var overlayAdded = false
-    private var overlayView: View? = null
-    private var waveView: View? = null
-    private var ringView: View? = null
-    private var bubbleText: TextView? = null
-    private var triggerJob: Job? = null
-    private var errorBackoffMs = 800L
-    private var currentMaxAmp = 0f
-    private var wakeLock: PowerManager.WakeLock? = null
-
-    // TTS
-    private var ttsEngine: android.speech.tts.TextToSpeech? = null
-
     override fun onCreate() {
         super.onCreate()
-        prefs = PreferencesManager(this)
         backend = MishBackend(this)
         ttsEngine = android.speech.tts.TextToSpeech(applicationContext) { status ->
             if (status == android.speech.tts.TextToSpeech.SUCCESS) {
                 ttsEngine?.setLanguage(Locale.UK)
+                ttsEngine?.setOnUtteranceProgressListener(object :
+                    android.speech.tts.UtteranceProgressListener() {
+                    override fun onStart(utteranceId: String?) {
+                        if ("mish_reply" == utteranceId) {
+                            setOrbState(OrbState.SPEAKING)
+                        }
+                    }
+                    override fun onDone(utteranceId: String?) {
+                        if ("mish_reply" == utteranceId) {
+                            setOrbState(OrbState.LISTENING)
+                        }
+                    }
+                    @Suppress("DEPRECATION")
+                    override fun onError(utteranceId: String?) {
+                        if ("mish_reply" == utteranceId) {
+                            setOrbState(OrbState.LISTENING)
+                        }
+                    }
+                })
             }
         }
         createChannel()
         acquireWakeLock()
     }
 
+    // ---------- Lifecycle ----------
+    private lateinit var backend: MishBackend
+    private var ttsEngine: android.speech.tts.TextToSpeech? = null
+    private var wakeLock: PowerManager.WakeLock? = null
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
-            ACTION_STOP -> {
-                stopMish()
-                return START_NOT_STICKY
-            }
+            ACTION_STOP -> { stopMish(); return START_NOT_STICKY }
         }
-
         isRunning = true
         startForeground(NOTIFICATION_ID, buildNotification())
-        // Show Siri-like animation immediately so the user sees Mish is alive.
-        showOverlay("Mish sun rahi hai... 'Mish' bolo")
-        startWakeWordListening()
+        showOrb()
+        startListening()
         return START_STICKY
     }
 
@@ -130,75 +148,53 @@ class MishService : Service(), RecognitionListener {
 
     private fun stopMish() {
         isRunning = false
-        triggerJob?.cancel()
-        triggerJob = null
-        removeOverlay()
-        speechRecognizer?.destroy()
-        speechRecognizer = null
-        ttsEngine?.stop()
-        ttsEngine?.shutdown()
+        stopOrbAnimation()
+        removeOrb()
+        stopListening()
+        speechRecognizer?.destroy(); speechRecognizer = null
+        ttsEngine?.stop(); ttsEngine?.shutdown()
         releaseWakeLock()
+        scope.cancel()
+        job.cancel()
     }
 
-    // ---------- Wake lock (keeps mic live even when screen off) ----------
+    // ---------- Wake lock ----------
     private fun acquireWakeLock() {
         try {
             val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
             wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "MishAI::wake")
             wakeLock?.setReferenceCounted(false)
             wakeLock?.acquire(10 * 60 * 1000L)
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
+        } catch (e: Exception) { e.printStackTrace() }
     }
-
     private fun releaseWakeLock() {
-        try {
-            if (wakeLock?.isHeld == true) wakeLock?.release()
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
+        try { if (wakeLock?.isHeld == true) wakeLock?.release() } catch (e: Exception) { e.printStackTrace() }
         wakeLock = null
     }
-
     private fun refreshWakeLock() {
-        try {
-            if (wakeLock?.isHeld == true) wakeLock?.release()
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
+        try { if (wakeLock?.isHeld == true) wakeLock?.release() } catch (e: Exception) { e.printStackTrace() }
         acquireWakeLock()
     }
 
-    // ---------- Foreground notification ----------
+    // ---------- Notification ----------
     private fun createChannel() {
         val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        val channel = NotificationChannel(
-            CHANNEL_ID,
-            "Mish AI Listening",
-            NotificationManager.IMPORTANCE_LOW
-        )
+        val channel = NotificationChannel(CHANNEL_ID, "Mish AI", NotificationManager.IMPORTANCE_LOW)
         channel.setShowBadge(false)
         nm.createNotificationChannel(channel)
     }
-
     private fun buildNotification(): Notification {
-        val openIntent = Intent(this, MainActivity::class.java)
-        openIntent.flags = Intent.FLAG_ACTIVITY_SINGLE_TOP
-        val pi = PendingIntent.getActivity(
-            this, 0, openIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-
+        val openIntent = Intent(this, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP
+        }
+        val pi = PendingIntent.getActivity(this, 0, openIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
         val stopIntent = Intent(this, MishService::class.java).setAction(ACTION_STOP)
-        val stopPi = PendingIntent.getService(
-            this, 1, stopIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-
+        val stopPi = PendingIntent.getService(this, 1, stopIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("Mish AI is listening")
-            .setContentText("Say \"Mish\" anytime to talk")
+            .setContentTitle("Mish AI")
+            .setContentText("Ready — bolo aur jawab do")
             .setSmallIcon(R.drawable.ic_mish_notification)
             .setContentIntent(pi)
             .setOngoing(true)
@@ -206,192 +202,382 @@ class MishService : Service(), RecognitionListener {
             .build()
     }
 
-    // ---------- Wake word detection (en-US, reliable on all devices) ----------
-    private fun startWakeWordListening() {
-        if (listeningSession) return
-        refreshWakeLock()
-        startRecognition(
-            language = "en-US",
-            onStart = {},
-            onResult = { text ->
-                errorBackoffMs = 800L
-                val t = text.lowercase(Locale.getDefault())
-                val wake = WAKE_WORDS.any { t.contains(it) }
-                if (wake) {
-                    updateBubble("Haan! Mish yahan hai 🙂")
-                    triggerJob = scope.launch {
-                        delay(250)
-                        eligibleForConversation()
-                    }
-                } else {
-                    if (!conversationActive) startWakeWordListening()
-                }
-            },
-            onError = {
-                scope.launch {
-                    delay(errorBackoffMs)
-                    errorBackoffMs = (errorBackoffMs * 1.6f).toLong().coerceAtMost(4000L)
-                    if (!conversationActive) startWakeWordListening()
-                }
-            }
-        )
+    // =========================================================
+    //  CONTINUOUS LISTENING (AudioRecord + custom VAD)
+    // =========================================================
+    private var audioRecord: AudioRecord? = null
+    private var audioThread: Thread? = null
+
+    // VAD parameters
+    private val SAMPLE_RATE = 16000
+    private val SILENCE_THRESHOLD = 0.055f        // below = silence (tunable)
+    private val MIN_SPEECH_MS = 180                 // must be speaking this long to be "speech"
+    private val HOLD_MS = 500                       // silence this long ends a segment
+    private val MIN_BARGE_MS = 1200                 // min utterance before barge-in
+
+    private val speechSamples = mutableListOf<Short>()
+    @Volatile private var segmentActive = false
+    @Volatile private var segmentStartedAt = 0L
+    @Volatile private var lastSpeechAt = 0L
+    @Volatile private var recognizing = false      // SpeechRecognizer currently running
+    @Volatile private var segmentPeakAmp = 0f
+
+    /**
+     * A complete voice segment was detected by our VAD above the silence
+     * threshold for the minimum duration. We now hand the mic over to
+     * SpeechRecognizer for actual transcription. Before starting, we pause
+     * our own AudioRecord so both don't fight for the mic.
+     */
+    private fun onVoiceSegment(@Suppress("UNUSED_PARAMETER") clip: List<Short>,
+                               @Suppress("UNUSED_PARAMETER") durationMs: Long) {
+        if (recognizing || !isRunning) return
+        recognizing = true
+        setOrbState(OrbState.LISTENING)
+        orbAmplitude = 0.9f
+
+        // Pause our VAD monitor so SpeechRecognizer gets exclusive mic access
+        pauseAudioMonitor()
+
+        // Start a fresh recognizer for the ongoing utterance
+        startSpeechRecognizer()
+
+        // Safety: if recognizer never completes, resume monitoring
+        uiHandler.postDelayed({ resumeAfterRecognition() }, 20000)
     }
 
-    // ---------- Conversation capture ----------
-    private fun eligibleForConversation() {
-        if (conversationActive) return
-        conversationActive = true
-        val profile = prefs.loadProfile()
-        val name = profile.displayName()
-        val role = profile.roleWord()
-        speak("Haan $role $name, kaho, kya karna hai? Mish sun rahi hai.")
-        startCaptureConversation()
-    }
-
-    private fun startCaptureConversation() {
-        errorBackoffMs = 800L
-        startRecognition(
-            language = "en-US",
-            onStart = {},
-            onResult = { text ->
-                if (text.isBlank()) {
-                    conversationActive = false
-                    startWakeWordListening()
-                    return@startRecognition
-                }
-                MishServiceBridge.onUserSpeech?.invoke(text)
-                onUserSpeech?.invoke(text)
-
-                if (EmergencyHelper.isEmergencyTrigger(text)) {
-                    val profile = prefs.loadProfile()
-                    EmergencyHelper.sendEmergencyAlert(this, profile)
-                    EmergencyHelper.openCall(this, profile.emergencyNumber)
-                    speak("Emergency alert bhej diya hai, saath mein call ho rahi hai.")
-                    conversationActive = false
-                    scope.launch {
-                        delay(3000)
-                        startWakeWordListening()
-                    }
-                    return@startRecognition
-                }
-
-                backend.ask(text, currentMaxAmp, object : MishBackend.CallbackResult {
-                    override fun onSuccess(reply: MishBackend.MishReply) {
-                        runOnMain {
-                            updateBubble(reply.text)
-                            MishServiceBridge.onMishReply?.invoke(reply.text, reply.mood)
-                            onMishReply?.invoke(reply.text, reply.mood)
-                            speak(reply.text)
-                            conversationActive = false
-                            startWakeWordListening()
-                        }
-                    }
-
-                    override fun onError(error: String) {
-                        runOnMain {
-                            speak("Kuch ghalti hui, dobara kaho.")
-                            conversationActive = false
-                            startWakeWordListening()
-                        }
-                    }
-                })
-            },
-            onError = {
-                conversationActive = false
-                startWakeWordListening()
-            }
-        )
-    }
-
-    private fun speak(text: String) {
-        ttsEngine?.speak(text, android.speech.tts.TextToSpeech.QUEUE_FLUSH, null, "mish_reply")
-    }
-
-    // ---------- Shared recognition helper ----------
-    private var currentOnStart: (() -> Unit)? = null
-    private var currentOnResult: ((String) -> Unit)? = null
-    private var currentOnError: (() -> Unit)? = null
-
-    private fun startRecognition(
-        language: String,
-        onStart: () -> Unit,
-        onResult: (String) -> Unit,
-        onError: () -> Unit
-    ) {
+    private fun startSpeechRecognizer() {
         try {
             if (!SpeechRecognizer.isRecognitionAvailable(this)) {
-                currentOnError?.invoke()
-                return
+                recognizing = false; resumeAudioMonitor(); return
             }
+            suppressGoogleMicSound()
             val rec = SpeechRecognizer.createSpeechRecognizer(this)
-            if (speechRecognizer != null && speechRecognizer !== rec) {
-                speechRecognizer?.destroy()
-            }
+            if (speechRecognizer != null && speechRecognizer !== rec) speechRecognizer?.destroy()
             speechRecognizer = rec
-            currentOnStart = onStart
-            currentOnResult = onResult
-            currentOnError = onError
-            listeningSession = true
-
             val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
                 putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-                putExtra(RecognizerIntent.EXTRA_LANGUAGE, language)
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE, "en-US")
                 putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
                 putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
                 putExtra("android.speech.extra.DICTATION_MODE", true)
             }
-            rec.setRecognitionListener(this)
+            rec.setRecognitionListener(modelListener())
             rec.startListening(intent)
         } catch (e: Exception) {
-            currentOnError?.invoke()
+            recognizing = false
+            resumeAudioMonitor()
         }
     }
 
-    private fun runOnMain(block: () -> Unit) {
-        scope.launch { block() }
+    private var savedNotifVol = 0
+    private var savedSystemVol = 0
+
+    private fun suppressGoogleMicSound() {
+        try {
+            val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+            savedNotifVol = am.getStreamVolume(AudioManager.STREAM_NOTIFICATION)
+            savedSystemVol = am.getStreamVolume(AudioManager.STREAM_SYSTEM)
+            am.setStreamVolume(AudioManager.STREAM_NOTIFICATION, 0, 0)
+            am.setStreamVolume(AudioManager.STREAM_SYSTEM, 0, 0)
+        } catch (_: Exception) {}
     }
 
-    // ---------- RecognitionListener ----------
-    override fun onReadyForSpeech(params: Bundle?) { currentOnStart?.invoke() }
-    override fun onRmsChanged(rmsdB: Float) {
-        currentMaxAmp = ((rmsdB + 3f) / 6f).coerceIn(0f, 1f)
+    private fun restoreAudioAfterRecognition() {
+        try {
+            val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+            am.setStreamVolume(AudioManager.STREAM_NOTIFICATION, savedNotifVol, 0)
+            am.setStreamVolume(AudioManager.STREAM_SYSTEM, savedSystemVol, 0)
+        } catch (_: Exception) {}
     }
+
+    // Listener used for the continuous conversation model
+    private fun modelListener(): RecognitionListener {
+        return object : RecognitionListener {
+            override fun onReadyForSpeech(params: Bundle?) {}
+            override fun onRmsChanged(rmsdB: Float) {
+                if (isRunning && orbState == OrbState.LISTENING)
+                    orbAmplitude = ((rmsdB + 3f) / 6f).coerceIn(0f, 1f)
+            }
+            override fun onBeginningOfSpeech() { setOrbState(OrbState.LISTENING); orbAmplitude = 0.6f }
+            override fun onBufferReceived(buffer: ByteArray?) {}
+            override fun onEndOfSpeech() {}
+            override fun onEvent(eventType: Int, params: Bundle?) {}
+            override fun onPartialResults(partialResults: Bundle?) {
+                val t = partialResults
+                    ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                    ?.firstOrNull()?.takeIf { it.isNotBlank() }
+                if (t != null) {
+                    MishServiceBridge.onUserSpeech?.invoke(t)
+                    onUserSpeech?.invoke(t)
+                }
+            }
+            override fun onResults(results: Bundle?) {
+                recognizing = false
+                restoreAudioAfterRecognition()
+                val text = results
+                    ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                    ?.firstOrNull()?.takeIf { it.isNotBlank() } ?: ""
+                speechRecognizer?.destroy(); speechRecognizer = null
+                resumeAudioMonitor()
+                if (isRunning) handleRecognizedText(text)
+            }
+            override fun onError(error: Int) {
+                recognizing = false
+                restoreAudioAfterRecognition()
+                speechRecognizer?.destroy(); speechRecognizer = null
+                resumeAudioMonitor()
+                if (isRunning) setOrbState(OrbState.LISTENING)
+            }
+        }
+    }
+
+    private fun resumeAfterRecognition() {
+        if (recognizing) {
+            recognizing = false
+            speechRecognizer?.cancel()
+            speechRecognizer?.destroy(); speechRecognizer = null
+        }
+        restoreAudioAfterRecognition()
+        resumeAudioMonitor()
+        setOrbState(OrbState.LISTENING)
+    }
+
+    private fun resumeAudioMonitor() {
+        scope.launch {
+            stopAudioMonitorInternal()
+            delay(120)
+            if (isRunning && !recognizing) startAudioMonitor()
+        }
+    }
+
+    private fun pauseAudioMonitor() {
+        try { audioRecord?.stop() } catch (e: Exception) {}
+    }
+
+    private fun startAudioMonitor() {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
+            != PackageManager.PERMISSION_GRANTED) return
+        val bufferSize = AudioRecord.getMinBufferSize(
+            SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT
+        ).coerceAtLeast(SAMPLE_RATE * 2)
+        audioRecord = try {
+            AudioRecord(
+                MediaRecorder.AudioSource.VOICE_RECOGNITION,
+                SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, bufferSize
+            )
+        } catch (e: Exception) { null } ?: return
+        try { audioRecord?.startRecording() } catch (e: Exception) { return }
+        segmentActive = false
+        audioThread = Thread {
+            val buf = ShortArray(bufferSize / 2)
+            while (Thread.currentThread().isAlive && isRunning && !recognizing) {
+                val audio = audioRecord ?: break
+                if (audio.recordingState != AudioRecord.RECORDSTATE_RECORDING) break
+                val read = try { audio.read(buf, 0, buf.size) } catch (e: Exception) { break }
+                if (read <= 0) continue
+                var sum = 0.0
+                for (i in 0 until read) sum += (buf[i].toDouble() * buf[i].toDouble())
+                val rms = (sum / read).let { Math.sqrt(it) }
+                val normAmp = (rms / 32768.0).toFloat()
+                val liveAmp = (normAmp * 3.0f).coerceIn(0f, 1f).let { it * it }
+                if (isRunning && orbState == OrbState.LISTENING) orbAmplitude = liveAmp
+
+                if (normAmp > SILENCE_THRESHOLD) {
+                    val now = System.currentTimeMillis()
+                    if (!segmentActive) {
+                        segmentActive = true
+                        segmentStartedAt = now
+                        speechSamples.clear()
+                        segmentPeakAmp = 0f
+                    }
+                    if (normAmp > segmentPeakAmp) segmentPeakAmp = normAmp
+                    lastSpeechAt = now
+                    speechSamples.addAll(buf.take(read))
+                    // Barge-in only on a genuinely loud, sustained utterance so the
+                    // assistant won't interrupt its own TTS reply.
+                    if (orbState == OrbState.SPEAKING &&
+                        segmentPeakAmp > 0.22f &&
+                        now - segmentStartedAt > MIN_BARGE_MS
+                    ) {
+                        scope.launch { bargeIn() }
+                    }
+                } else {
+                    if (segmentActive) {
+                        val now = System.currentTimeMillis()
+                        if (now - lastSpeechAt > HOLD_MS) {
+                            val duration = now - segmentStartedAt
+                            val clip = speechSamples.toList()
+                            segmentActive = false
+                            // Only hand over to recognition when the assistant is NOT
+                            // speaking, to avoid the assistant answering its own voice.
+                            if (duration >= MIN_SPEECH_MS && clip.isNotEmpty() &&
+                                orbState != OrbState.SPEAKING
+                            ) {
+                                scope.launch { onVoiceSegment(clip, duration) }
+                                break
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        audioThread?.isDaemon = true
+        audioThread?.start()
+    }
+
+    private fun stopAudioMonitorInternal() {
+        segmentActive = false
+        try { audioRecord?.stop() } catch (e: Exception) {}
+        try { audioRecord?.release() } catch (e: Exception) {}
+        audioRecord = null
+        audioThread = null
+    }
+
+    private fun stopListening() {
+        segmentActive = false
+        recognizing = false
+        stopAudioMonitorInternal()
+        uiHandler.removeCallbacksAndMessages(null)
+    }
+
+    private fun startListening() {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
+            != PackageManager.PERMISSION_GRANTED
+        ) {
+            setOrbState(OrbState.IDLE)
+            return
+        }
+        refreshWakeLock()
+        setOrbState(OrbState.LISTENING)
+        startAudioMonitor()
+    }
+
+    // ============ RecognitionListener (class-level, not used; listener is modelListener) ============
+    private var speechRecognizer: SpeechRecognizer? = null
+
+    override fun onReadyForSpeech(params: Bundle?) {}
+    override fun onRmsChanged(rmsdB: Float) { if (isRunning && orbState == OrbState.LISTENING) orbAmplitude = ((rmsdB + 3f) / 6f).coerceIn(0f, 1f) }
     override fun onBeginningOfSpeech() {}
     override fun onBufferReceived(buffer: ByteArray?) {}
     override fun onEndOfSpeech() {}
     override fun onEvent(eventType: Int, params: Bundle?) {}
     override fun onPartialResults(partialResults: Bundle?) {}
-    override fun onResults(results: Bundle?) {
-        listeningSession = false
-        val text = results
-            ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-            ?.firstOrNull()
-            ?.takeIf { it.isNotBlank() } ?: ""
-        currentOnResult?.invoke(text)
-    }
-    override fun onError(error: Int) {
-        listeningSession = false
-        currentOnError?.invoke()
+    override fun onResults(results: Bundle?) {}
+    override fun onError(error: Int) {}
+
+    // =========================================================
+    //  HANDLE RECOGNIZED TEXT (always-on, hands-free)
+    // =========================================================
+    @Volatile private var conversationActive = true
+    @Volatile private var waitingReply = false
+
+    private fun handleRecognizedText(raw: String) {
+        val text = raw.trim()
+        if (text.isEmpty()) { setOrbState(OrbState.LISTENING); return }
+
+        // Always-on conversation mode: no wake word required after start.
+        // The assistant stays active and processes whatever the user says.
+        processCommand(text)
     }
 
-    // ---------- Siri-like floating animation ----------
-    @SuppressLint("InflateParams")
-    private fun showOverlay(bubble: String) {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return
-        if (!Settings.canDrawOverlays(this)) return
-        if (overlayAdded) {
-            bubbleText?.text = bubble
+    private fun processCommand(text: String) {
+        if (text.isBlank() || waitingReply) { setOrbState(OrbState.LISTENING); return }
+        waitingReply = true
+
+        MishServiceBridge.onUserSpeech?.invoke(text)
+        onUserSpeech?.invoke(text)
+
+        if (EmergencyHelper.isEmergencyTrigger(text)) {
+            val profile = prefsForOrb.loadProfile()
+            EmergencyHelper.sendEmergencyAlert(this, profile)
+            EmergencyHelper.openCall(this, profile.emergencyNumber)
+            setOrbState(OrbState.SPEAKING)
+            speak("Emergency alert bhej diya hai, saath mein call ho rahi hai.")
+            waitingReply = false
+            conversationActive = false
+            setOrbState(OrbState.LISTENING)
             return
         }
 
+        setOrbState(OrbState.THINKING)
+        backend.ask(text, orbAmplitude, object : MishBackend.CallbackResult {
+            override fun onSuccess(reply: MishBackend.MishReply) {
+                waitingReply = false
+                MishServiceBridge.onMishReply?.invoke(reply.text, reply.mood)
+                onMishReply?.invoke(reply.text, reply.mood)
+                // Speak the reply with the mood-adjusted rate/pitch
+                setOrbState(OrbState.SPEAKING)
+                speakWithMood(reply.text, reply.mood)
+            }
+            override fun onError(error: String) {
+                waitingReply = false
+                setOrbState(OrbState.SPEAKING)
+                speak("Kuch ghalti hui, dobara kaho.")
+            }
+        })
+    }
+
+    // Auto-return to listening once reply finished (see TTS listener)
+    private fun speak(text: String) {
+        ttsEngine?.speak(text, android.speech.tts.TextToSpeech.QUEUE_FLUSH, null, "mish_reply")
+    }
+    private fun speakWithMood(text: String, mood: Mood) {
+        val bundle = Bundle().apply {
+            putFloat("rate", mood.speed)
+            putFloat("pitch", mood.pitch)
+        }
+        ttsEngine?.speak(text, android.speech.tts.TextToSpeech.QUEUE_FLUSH, bundle, "mish_reply")
+    }
+
+    // Barge-in: user interrupted while assistant was speaking
+    private fun bargeIn() {
+        // Mute TTS immediately
+        ttsEngine?.stop()
+        setOrbState(OrbState.LISTENING)
+        // The in-flight recognition will handle the new text.
+        conversationActive = true
+        // If a reply was waiting, reset it so new speech is processed.
+        waitingReply = false
+    }
+
+    // =========================================================
+    //  ORB — draggable, resizable, state-reactive, transparent
+    // =========================================================
+    private var overlayAdded = false
+    private var rootView: View? = null
+    private var coreView: View? = null
+    private var haloView: View? = null
+    private var rippleView: View? = null
+    private var wm: WindowManager? = null
+    private var overlayParams: WindowManager.LayoutParams? = null
+
+    @SuppressLint("ClickableViewAccessibility")
+    private fun showOrb() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return
+        if (!Settings.canDrawOverlays(this)) return
+        if (overlayAdded) return
         try {
-            val wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+            wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
             val li = LayoutInflater.from(this)
             val view = li.inflate(R.layout.overlay_mish, null)
-            bubbleText = view.findViewById(R.id.bubble_text)
-            waveView = view.findViewById(R.id.wave_view)
-            ringView = view.findViewById(R.id.ring_view)
-            bubbleText?.text = bubble
+            rootView = view
+            coreView = view.findViewById(R.id.core_view)
+            haloView = view.findViewById(R.id.halo_view)
+            rippleView = view.findViewById(R.id.ripple_view)
+
+            val display = wm?.defaultDisplay
+            val dm = android.graphics.Point().also { display?.getRealSize(it) }
+
+            // Restore saved position (if any), else default top-center-ish
+            val saved = loadOrbPrefs()
+            orbSizePx = saved.size
+            if (saved.x > 0) {
+                orbX = saved.x
+                orbY = saved.y
+            } else {
+                orbX = (dm.x / 2) - (orbSizePx / 2).toInt()
+                orbY = (dm.y / 3)
+            }
 
             val params = WindowManager.LayoutParams(
                 WindowManager.LayoutParams.WRAP_CONTENT,
@@ -401,68 +587,201 @@ class MishService : Service(), RecognitionListener {
                 else
                     WindowManager.LayoutParams.TYPE_PHONE,
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                    WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
+                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
                 PixelFormat.TRANSLUCENT
             ).apply {
-                gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
-                y = 240
+                gravity = Gravity.TOP or Gravity.START
+                x = orbX
+                y = orbY
             }
-            wm.addView(view, params)
+            overlayParams = params
+            applyOrbSize()
+            wm?.addView(view, params)
             overlayAdded = true
-            overlayView = view
-            startPulseAnimation()
+
+            // Touch handling: drag to move; long-press + drag to resize
+            val scaleDetector = ScaleGestureDetector(this, object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
+                override fun onScale(detector: ScaleGestureDetector): Boolean {
+                    orbSizePx = (orbSizePx * detector.scaleFactor).coerceIn(48f, 160f)
+                    applyOrbSize()
+                    return true
+                }
+            })
+            var startX = 0; var startY = 0
+            var startLx = orbX; var startLy = orbY
+            var actionByPinch = false
+            var downTime = 0L
+            var moved = false
+
+            view.setOnTouchListener { _, ev ->
+                scaleDetector.onTouchEvent(ev)
+                val scaleInProgress = scaleDetector.isInProgress
+                when (ev.actionMasked) {
+                    MotionEvent.ACTION_DOWN -> {
+                        startX = ev.rawX.toInt()
+                        startY = ev.rawY.toInt()
+                        startLx = orbX
+                        startLy = orbY
+                        downTime = System.currentTimeMillis()
+                        moved = false
+                        actionByPinch = scaleInProgress
+                    }
+                    MotionEvent.ACTION_MOVE -> {
+                        if (!scaleInProgress) {
+                            val dx = ev.rawX.toInt() - startX
+                            val dy = ev.rawY.toInt() - startY
+                            if (abs(dx) > 4 || abs(dy) > 4) moved = true
+                            if (moved && !actionByPinch) {
+                                // Drag the orb
+                                orbX = startLx + dx
+                                orbY = startLy + dy
+                                updateOrbPosition()
+                            }
+                        }
+                    }
+                    MotionEvent.ACTION_UP -> {
+                        if (!moved && System.currentTimeMillis() - downTime < 450) {
+                            // Tap = restart listening / wake
+                            onOrbTap()
+                        }
+                        saveOrbPrefs()
+                    }
+                }
+                true
+            }
+            startOrbAnimation()
         } catch (e: Exception) {
             overlayAdded = false
         }
     }
 
-    /** Breathing Siri-like pulse: core circle + expanding halo ring. */
+    private fun applyOrbSize() {
+        val px = orbSizePx
+        coreView?.layoutParams = coreView?.layoutParams?.apply { width = px.toInt(); height = px.toInt() }
+        haloView?.layoutParams = haloView?.layoutParams?.apply { width = (px * 1.3f).toInt(); height = (px * 1.3f).toInt() }
+        rippleView?.layoutParams = rippleView?.layoutParams?.apply { width = (px * 1.1f).toInt(); height = (px * 1.1f).toInt() }
+    }
+
+    private fun updateOrbPosition() {
+        overlayParams?.x = orbX
+        overlayParams?.y = orbY
+        try { wm?.updateViewLayout(rootView, overlayParams) } catch (e: Exception) {}
+    }
+
+    private fun onOrbTap() {
+        if (!isRunning) return
+        setOrbState(OrbState.LISTENING)
+        // Optionally nudge recognition
+    }
+
+    private fun removeOrb() {
+        if (!overlayAdded) return
+        try { rootView?.let { wm?.removeView(it) } } catch (e: Exception) { e.printStackTrace() }
+        overlayAdded = false
+        rootView = null; coreView = null; haloView = null; rippleView = null
+        overlayParams = null
+    }
+
+    // ----- Orb state animation -----
     private var pulsePhase = 0f
-    private val pulseRunnable = object : Runnable {
+    private var currentAmplitude = 0f
+    private var targetState = OrbState.IDLE
+    private var stateChangedAt = 0L
+
+    private fun setOrbState(state: OrbState) {
+        targetState = state
+        stateChangedAt = System.currentTimeMillis()
+        orbState = state
+        if (state == OrbState.LISTENING) orbAmplitude = 0f
+
+        // Animate core background reflecting the state
+        val res = when (state) {
+            OrbState.IDLE -> R.drawable.bg_orb_idle
+            OrbState.LISTENING -> R.drawable.bg_orb_idle
+            OrbState.THINKING -> R.drawable.bg_orb_thinking
+            OrbState.SPEAKING -> R.drawable.bg_orb_speaking
+        }
+        runOnMain { coreView?.setBackgroundResource(res) }
+
+        // Ripple/glow react strongly for speaking & listening
+        coreView?.animate()?.scaleX(1f)?.scaleY(1f)?.setDuration(250)?.start()
+    }
+
+    private val orbRunnable = object : Runnable {
         override fun run() {
             if (!overlayAdded) return
-            pulsePhase += 0.12f
-            val core = 1f + 0.15f * sin(pulsePhase)
-            waveView?.scaleX = core
-            waveView?.scaleY = core
+            pulsePhase += 0.10f
 
-            val halo = 0.9f + 0.3f * sin(pulsePhase + 1.2f)
-            ringView?.scaleX = halo
-            ringView?.scaleY = halo
-            ringView?.alpha = (0.25f + 0.2f * (0.5f + 0.5f * sin(pulsePhase + 1.2f)))
-                .coerceIn(0f, 1f)
+            // Smooth the amplitude towards its live target
+            val target = when (targetState) {
+                OrbState.LISTENING -> orbAmplitude
+                OrbState.SPEAKING -> 0.55f + 0.35f * sin(pulsePhase * 2.2f)
+                OrbState.THINKING -> 0.3f + 0.25f * abs(sin(pulsePhase * 1.1f))
+                OrbState.IDLE -> 0.12f + 0.08f * sin(pulsePhase)
+            }
+            currentAmplitude += (target - currentAmplitude) * 0.25f
+            val a = currentAmplitude.coerceIn(0f, 1f)
 
-            waveView?.postDelayed(this, 50)
+            val core = coreView
+            val halo = haloView
+            val ripple = rippleView
+            if (core != null) {
+                when (targetState) {
+                    OrbState.IDLE -> core.scaleX = 0.96f + 0.04f * sin(pulsePhase)
+                    OrbState.LISTENING -> core.scaleX = 1f + 0.10f * a * Math.abs(sin(pulsePhase * 1.8f)).toFloat()
+                    OrbState.THINKING -> core.scaleX = 0.94f + 0.06f * Math.abs(sin(pulsePhase * 0.9f)).toFloat()
+                    OrbState.SPEAKING -> core.scaleX = (1f + 0.22f * Math.abs(sin(pulsePhase * 3.4f)).toFloat())
+                }
+                core.scaleY = core.scaleX
+            }
+            if (halo != null) {
+                val haloScale = 1.05f + 0.35f * a
+                halo.scaleX = haloScale
+                halo.scaleY = haloScale
+                halo.alpha = (0.25f + 0.5f * a).coerceIn(0f, 0.85f)
+            }
+            if (ripple != null) {
+                val rScale = 1.0f + 0.5f * a
+                ripple.scaleX = rScale
+                ripple.scaleY = rScale
+                ripple.alpha = (0.15f + 0.4f * a).coerceIn(0f, 0.6f)
+            }
+
+            core?.postDelayed(this, 33) // ~30 FPS
         }
     }
 
-    private fun startPulseAnimation() {
-        uiHandler.removeCallbacks(pulseRunnable)
+    private fun startOrbAnimation() {
+        uiHandler.removeCallbacks(orbRunnable)
         pulsePhase = 0f
-        waveView?.post(pulseRunnable)
+        currentAmplitude = 0f
+        setOrbState(OrbState.LISTENING)
+        rootView?.post(orbRunnable)
+    }
+    private fun stopOrbAnimation() {
+        uiHandler.removeCallbacks(orbRunnable)
     }
 
-    private fun updateBubble(text: String) {
-        bubbleText?.text = text
-        bubbleText?.postDelayed({
-            if (overlayAdded) bubbleText?.text = "Mish sun rahi hai..."
-        }, 5000)
+    // ----- Orb prefs persistence -----
+    private data class OrbPrefs(val x: Int, val y: Int, val size: Float)
+    private fun loadOrbPrefs(): OrbPrefs {
+        val sp = getSharedPreferences("orb_prefs", Context.MODE_PRIVATE)
+        return OrbPrefs(
+            sp.getInt("x", 0),
+            sp.getInt("y", 0),
+            sp.getFloat("size", 90f)
+        )
+    }
+    private fun saveOrbPrefs() {
+        getSharedPreferences("orb_prefs", Context.MODE_PRIVATE).edit()
+            .putInt("x", orbX)
+            .putInt("y", orbY)
+            .putFloat("size", orbSizePx)
+            .apply()
     }
 
-    private fun removeOverlay() {
-        if (!overlayAdded) return
-        uiHandler.removeCallbacks(pulseRunnable)
-        try {
-            val wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
-            overlayView?.let { wm.removeView(it) }
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
-        overlayAdded = false
-        overlayView = null
-        waveView = null
-        ringView = null
-        bubbleText = null
+    private fun runOnMain(block: () -> Unit) {
+        scope.launch { block() }
     }
 
     override fun onBind(intent: Intent?): IBinder? = null

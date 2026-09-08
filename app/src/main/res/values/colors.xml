@@ -1,12 +1,25 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <color name="primary">#8B5CF6</color>
+    <color name="primary_light">#A78BFA</color>
     <color name="primary_dark">#6D28D9</color>
     <color name="accent">#EC4899</color>
-    <color name="background">#0F0B1E</color>
-    <color name="surface">#1B1432</color>
+    <color name="accent_light">#F472B6</color>
+    <color name="background">#0A0620</color>
+    <color name="background_deep">#05030F</color>
+    <color name="surface_glass">#1AFFFFFF</color>
+    <color name="surface_glass_strong">#26FFFFFF</color>
+    <color name="text_primary">#F5F3FB</color>
+    <color name="text_secondary">#B8B0D0</color>
+    <color name="muted">#8A82A0</color>
+    <color name="text_hint">#AAA2C0</color>
     <color name="white">#FFFFFF</color>
     <color name="black">#000000</color>
-    <color name="splash_bg">#0F0B1E</color>
-    <color name="launcher_bg">#0F0B1E</color>
+    <color name="input_bg">#14000000</color>
+    <color name="input_border">#33FFFFFF</color>
+    <color name="success">#34D399</color>
+    <color name="warning">#FBBF24</color>
+    <color name="error">#F87171</color>
+    <color name="splash_bg">#0A0620</color>
+    <color name="launcher_bg">#0A0620</color>
 </resources>

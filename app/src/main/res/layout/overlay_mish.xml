@@ -1,39 +1,44 @@
 <?xml version="1.0" encoding="utf-8"?>
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/orb_root"
     android:layout_width="wrap_content"
-    android:layout_height="wrap_content">
+    android:layout_height="wrap_content"
+    android:clipChildren="false"
+    android:clipToPadding="false">
 
-    <!-- Expanding halo ring (behind the core) -->
+    <!-- Outer expanding glow / halo (reacts to audio) -->
     <View
-        android:id="@+id/ring_view"
-        android:layout_width="124dp"
-        android:layout_height="124dp"
+        android:id="@+id/halo_view"
+        android:layout_width="96dp"
+        android:layout_height="96dp"
         android:layout_gravity="center"
-        android:alpha="0.6"
-        android:background="@drawable/bg_wave_circle" />
+        android:alpha="0"
+        android:background="@drawable/bg_orb_halo" />
 
-    <!-- Pulsing core circle (Siri-style) -->
+    <!-- Mid ripple ring (audio/state reactive) -->
     <View
-        android:id="@+id/wave_view"
-        android:layout_width="88dp"
-        android:layout_height="88dp"
+        android:id="@+id/ripple_view"
+        android:layout_width="72dp"
+        android:layout_height="72dp"
         android:layout_gravity="center"
-        android:background="@drawable/bg_wave_circle" />
+        android:alpha="0"
+        android:background="@drawable/bg_orb_halo" />
 
-    <TextView
-        android:id="@+id/bubble_text"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_gravity="bottom"
-        android:layout_marginTop="120dp"
-        android:background="@drawable/bg_bubble"
-        android:text="@string/overlay_bubble_text"
-        android:textColor="@color/white"
-        android:paddingStart="12dp"
-        android:paddingEnd="12dp"
-        android:paddingTop="8dp"
-        android:paddingBottom="8dp"
-        android:maxWidth="280dp"
-        android:textSize="14sp" />
+    <!-- Core orb -->
+    <View
+        android:id="@+id/core_view"
+        android:layout_width="72dp"
+        android:layout_height="72dp"
+        android:layout_gravity="center"
+        android:background="@drawable/bg_orb_idle" />
+
+    <!-- Subtle inner highlight -->
+    <View
+        android:id="@+id/highlight_view"
+        android:layout_width="24dp"
+        android:layout_height="24dp"
+        android:layout_gravity="center"
+        android:alpha="0.35"
+        android:background="@drawable/bg_orb_core" />
 
 </FrameLayout>

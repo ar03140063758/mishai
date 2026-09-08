@@ -7,4 +7,5 @@ package com.cybertech.mishai
 object MishServiceBridge {
     var onUserSpeech: ((String) -> Unit)? = null
     var onMishReply: ((String, Mood) -> Unit)? = null
+    var onServiceState: ((Boolean) -> Unit)? = null
 }

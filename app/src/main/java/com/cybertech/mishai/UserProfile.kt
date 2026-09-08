@@ -12,9 +12,7 @@ data class UserProfile(
     val setupComplete: Boolean = false
 ) {
     fun displayName(): String {
-        val r = role.trim().ifEmpty { "jani" }
         val n = name.trim().ifEmpty { "dost" }
-        // e.g. "Jani", "Boss", "bhai" — keep as provided
         return n
     }
 

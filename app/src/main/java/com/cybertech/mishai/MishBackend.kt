@@ -96,7 +96,7 @@ class MishBackend(private val context: Context) {
     }
 
     /** On-device fallback when no backend is configured. */
-    private fun buildLocalReply(input: String, profile: UserProfile, mood: Mood): MishReply {
+    private fun buildLocalReply(@Suppress("UNUSED_PARAMETER") input: String, profile: UserProfile, mood: Mood): MishReply {
         val name = profile.displayName()
         val role = profile.roleWord()
 

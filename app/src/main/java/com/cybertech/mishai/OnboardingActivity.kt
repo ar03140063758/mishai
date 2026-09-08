@@ -8,20 +8,31 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ArrowForward
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.blur
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
@@ -110,159 +121,328 @@ private fun OnboardingScreen(
     val nameValid = name.trim().isNotEmpty()
     val emergencyValid = emergency.trim().length >= 7
 
-    Column(
+    Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(MishColors.Background)
-            .verticalScroll(rememberScrollState())
-            .padding(24.dp),
-        horizontalAlignment = Alignment.CenterHorizontally
+            .background(
+                Brush.verticalGradient(
+                    listOf(
+                        MishColors.Background,
+                        MishColors.BackgroundSoft,
+                        MishColors.BackgroundDeep
+                    )
+                )
+            )
     ) {
-        Spacer(Modifier.height(48.dp))
-
-        // Progress indicator
-        LinearProgressIndicator(
-            progress = { step / 5f },
+        // Ambient glow
+        Box(
             modifier = Modifier
-                .fillMaxWidth()
-                .height(6.dp),
-            color = MishColors.Accent,
-            trackColor = MishColors.Surface
+                .align(Alignment.TopStart)
+                .size(220.dp)
+                .offset(x = (-80).dp, y = (-80).dp)
+                .blur(50.dp)
+                .background(MishColors.Primary.copy(alpha = 0.2f), CircleShape)
         )
-        Spacer(Modifier.height(32.dp))
+        Box(
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .size(280.dp)
+                .offset(x = 100.dp, y = 100.dp)
+                .blur(60.dp)
+                .background(MishColors.Accent.copy(alpha = 0.15f), CircleShape)
+        )
 
-        Text(
-            text = "Mish AI setup",
-            fontSize = 28.sp,
-            fontWeight = FontWeight.Bold,
-            color = Color.White
-        )
-        Text(
-            text = "Developed by Cyber Tech Agency",
-            fontSize = 13.sp,
-            color = MishColors.Muted
-        )
-        Spacer(Modifier.height(32.dp))
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .padding(24.dp)
+                .padding(top = 48.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            // Progress indicator with glass bar
+            LinearProgressIndicator(
+                progress = { step / 5f },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(6.dp)
+                    .clip(RoundedCornerShape(50.dp)),
+                color = MishColors.Accent,
+                trackColor = MishColors.GlassSurface,
+                strokeCap = androidx.compose.ui.graphics.StrokeCap.Round
+            )
+            Spacer(Modifier.height(28.dp))
 
-        when (step) {
-            1 -> {
-                Text("Tumhara naam kya hai?", fontSize = 18.sp, color = Color.White)
-                Text("User ka naam janshen aur anticipations karein 😊", fontSize = 12.sp, color = MishColors.Muted)
-                Spacer(Modifier.height(16.dp))
-                OutlinedTextField(
-                    value = name,
-                    onValueChange = { name = it },
-                    label = { Text("Naam") },
-                    singleLine = true,
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedBorderColor = MishColors.Accent,
-                        cursorColor = MishColors.Accent,
-                        focusedLabelColor = MishColors.Accent
+            // Logo
+            Box(
+                modifier = Modifier
+                    .size(56.dp)
+                    .shadow(12.dp, CircleShape)
+                    .background(
+                        Brush.linearGradient(listOf(MishColors.Primary, MishColors.Accent)),
+                        CircleShape
                     ),
-                    modifier = Modifier.fillMaxWidth()
-                )
-                Spacer(Modifier.height(24.dp))
-                Button(
-                    onClick = { step = 2 },
-                    enabled = nameValid,
-                    colors = ButtonDefaults.buttonColors(containerColor = MishColors.Accent)
-                ) { Text("Aage") }
+                contentAlignment = Alignment.Center
+            ) {
+                Text("M", fontWeight = FontWeight.Bold, fontSize = 24.sp, color = Color.White)
             }
-            2 -> {
-                Text("Apna role select karo", fontSize = 18.sp, color = Color.White)
-                Text("Mehrbani se apna role chunein", fontSize = 12.sp, color = MishColors.Muted)
-                Spacer(Modifier.height(16.dp))
-                FlowRowRoles(roles, role) { role = it }
-                Spacer(Modifier.height(24.dp))
-                Button(
-                    onClick = { step = 3 },
-                    colors = ButtonDefaults.buttonColors(containerColor = MishColors.Accent)
-                ) { Text("Aage") }
-            }
-            3 -> {
-                Text("Gender select karo", fontSize = 18.sp, color = Color.White)
-                Spacer(Modifier.height(16.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                    GenderChip("male", gender) { gender = it }
-                    GenderChip("female", gender) { gender = it }
-                    GenderChip("other", gender) { gender = it }
-                }
-                Spacer(Modifier.height(24.dp))
-                Button(
-                    onClick = { step = 4 },
-                    colors = ButtonDefaults.buttonColors(containerColor = MishColors.Accent)
-                ) { Text("Aage") }
-            }
-            4 -> {
-                Text("Emergency number do", fontSize = 18.sp, color = Color.White)
-                Text(
-                    "Jab tum 'help' ya 'bachao' kahoge, is number par SMS + live location jayegi",
-                    fontSize = 13.sp,
-                    color = MishColors.Muted,
-                    textAlign = TextAlign.Center
-                )
-                Spacer(Modifier.height(16.dp))
-                OutlinedTextField(
-                    value = emergency,
-                    onValueChange = { emergency = it },
-                    label = { Text("Emergency Number (+923221234567)") },
-                    singleLine = true,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedBorderColor = MishColors.Accent,
-                        cursorColor = MishColors.Accent,
-                        focusedLabelColor = MishColors.Accent
-                    ),
-                    modifier = Modifier.fillMaxWidth()
-                )
-                Spacer(Modifier.height(24.dp))
-                Button(
-                    onClick = { step = 5 },
-                    enabled = emergencyValid,
-                    colors = ButtonDefaults.buttonColors(containerColor = MishColors.Accent)
-                ) { Text("Aage") }
-            }
-            5 -> {
-                Text("Permissions aur overlay", fontSize = 18.sp, color = Color.White)
-                Text(
-                    "Mic + Camera permission dena hoga, aur overlay permission se Mish kisi bhi app par floating dikhegi.",
-                    fontSize = 13.sp,
-                    color = MishColors.Muted,
-                    textAlign = TextAlign.Center
-                )
-                Spacer(Modifier.height(16.dp))
-                OutlinedButton(
-                    onClick = onOverlayRequest,
-                    shape = RoundedCornerShape(14.dp)
-                ) { Text("Overlay Permission On Karo") }
-                Spacer(Modifier.height(24.dp))
-                Button(
-                    onClick = {
-                        val prefs = PreferencesManager(currentContext)
-                        val profile = prefs.loadProfile()
-                        prefs.saveProfile(
-                            profile.copy(
-                                name = name.trim(),
-                                role = role,
-                                gender = gender,
-                                emergencyNumber = emergency.trim(),
-                                setupComplete = true
+            Spacer(Modifier.height(12.dp))
+
+            Text(
+                text = "Mish AI",
+                fontSize = 26.sp,
+                fontWeight = FontWeight.Bold,
+                color = MishColors.TextPrimary
+            )
+            Text(
+                text = "Cyber Tech Agency",
+                fontSize = 12.sp,
+                color = MishColors.Muted
+            )
+            Spacer(Modifier.height(28.dp))
+
+            when (step) {
+                1 -> {
+                    AnimatedVisibility(step == 1) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text(
+                                text = "Tumhara naam kya hai?",
+                                fontSize = 20.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MishColors.TextPrimary
                             )
-                        )
-                        onFinish()
-                    },
-                    colors = ButtonDefaults.buttonColors(containerColor = MishColors.Accent),
-                    modifier = Modifier.fillMaxWidth()
-                ) { Text("Setup Complete — Mish Start Karo") }
-            }
-        }
+                            Spacer(Modifier.height(6.dp))
+                            Text(
+                                text = "Main aapko naam se jaanna chahti hoon",
+                                fontSize = 13.sp,
+                                color = MishColors.Muted
+                            )
+                            Spacer(Modifier.height(20.dp))
+                            ModernTextField(
+                                value = name,
+                                onValueChange = { name = it },
+                                placeholder = "Apna naam likho..."
+                            )
+                            Spacer(Modifier.height(28.dp))
+                            ModernButton(
+                                text = "Aage",
+                                enabled = nameValid,
+                                onClick = { step = 2 }
+                            )
+                        }
+                    }
+                }
+                2 -> {
+                    AnimatedVisibility(step == 2) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text(
+                                text = "Apna role select karo",
+                                fontSize = 20.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MishColors.TextPrimary
+                            )
+                            Spacer(Modifier.height(6.dp))
+                            Text(
+                                text = "Main aapko isi se address karoongi",
+                                fontSize = 13.sp,
+                                color = MishColors.Muted
+                            )
+                            Spacer(Modifier.height(20.dp))
+                            FlowRowRoles(roles, role) { role = it }
+                            Spacer(Modifier.height(28.dp))
+                            ModernButton(text = "Aage", onClick = { step = 3 })
+                        }
+                    }
+                }
+                3 -> {
+                    AnimatedVisibility(step == 3) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text(
+                                text = "Gender select karo",
+                                fontSize = 20.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MishColors.TextPrimary
+                            )
+                            Spacer(Modifier.height(20.dp))
+                            Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                                GenderChip("male", gender) { gender = it }
+                                GenderChip("female", gender) { gender = it }
+                                GenderChip("other", gender) { gender = it }
+                            }
+                            Spacer(Modifier.height(28.dp))
+                            ModernButton(text = "Aage", onClick = { step = 4 })
+                        }
+                    }
+                }
+                4 -> {
+                    AnimatedVisibility(step == 4) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text(
+                                text = "Emergency number do",
+                                fontSize = 20.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MishColors.TextPrimary
+                            )
+                            Spacer(Modifier.height(6.dp))
+                            Text(
+                                text = "\"help\" ya \"bachao\" kabho to SMS + live location jayegi",
+                                fontSize = 13.sp,
+                                color = MishColors.Muted,
+                                textAlign = TextAlign.Center
+                            )
+                            Spacer(Modifier.height(20.dp))
+                            ModernTextField(
+                                value = emergency,
+                                onValueChange = { emergency = it },
+                                placeholder = "+92 322 1234567",
+                                keyboardType = KeyboardType.Phone
+                            )
+                            Spacer(Modifier.height(28.dp))
+                            ModernButton(
+                                text = "Aage",
+                                enabled = emergencyValid,
+                                onClick = { step = 5 }
+                            )
+                        }
+                    }
+                }
+                5 -> {
+                    AnimatedVisibility(step == 5) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text(
+                                text = "Permissions aur overlay",
+                                fontSize = 20.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MishColors.TextPrimary
+                            )
+                            Spacer(Modifier.height(6.dp))
+                            Text(
+                                text = "Mic + Camera + Floating orb permission dein,\ntaake Mish kisi bhi app par kaam kare",
+                                fontSize = 13.sp,
+                                color = MishColors.Muted,
+                                textAlign = TextAlign.Center
+                            )
+                            Spacer(Modifier.height(20.dp))
 
-        Spacer(Modifier.height(32.dp))
-        Text(
-            text = "Mish AI • Cyber Tech Agency",
-            fontSize = 12.sp,
-            color = MishColors.Muted
-        )
+                            Surface(
+                                onClick = onOverlayRequest,
+                                shape = RoundedCornerShape(16.dp),
+                                color = MishColors.GlassSurface,
+                                border = androidx.compose.foundation.BorderStroke(1.dp, MishColors.Primary.copy(alpha = 0.4f)),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(52.dp)
+                            ) {
+                                Box(contentAlignment = Alignment.Center) {
+                                    Text(
+                                        "Floating orb permission on karo",
+                                        color = MishColors.PrimaryLight,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                }
+                            }
+                            Spacer(Modifier.height(28.dp))
+                            ModernButton(
+                                text = "Setup Complete — Start",
+                                onClick = {
+                                    val prefs = PreferencesManager(currentContext)
+                                    val profile = prefs.loadProfile()
+                                    prefs.saveProfile(
+                                        profile.copy(
+                                            name = name.trim(),
+                                            role = role,
+                                            gender = gender,
+                                            emergencyNumber = emergency.trim(),
+                                            setupComplete = true
+                                        )
+                                    )
+                                    onFinish()
+                                }
+                            )
+                        }
+                    }
+                }
+            }
+
+            Spacer(Modifier.height(32.dp))
+            Text(
+                text = "Mish AI • Cyber Tech Agency",
+                fontSize = 12.sp,
+                color = MishColors.Muted
+            )
+        }
+    }
+}
+
+@Composable
+private fun ModernTextField(
+    value: String,
+    onValueChange: (String) -> Unit,
+    placeholder: String,
+    keyboardType: KeyboardType = KeyboardType.Text
+) {
+    Surface(
+        shape = RoundedCornerShape(16.dp),
+        color = MishColors.InputBackground,
+        border = androidx.compose.foundation.BorderStroke(1.dp, MishColors.InputBorder),
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(56.dp)
+            .shadow(4.dp, RoundedCornerShape(16.dp))
+    ) {
+        Box(modifier = Modifier.padding(horizontal = 16.dp), contentAlignment = Alignment.CenterStart) {
+            androidx.compose.foundation.text.BasicTextField(
+                value = value,
+                onValueChange = onValueChange,
+                textStyle = androidx.compose.ui.text.TextStyle(
+                    color = MishColors.TextPrimary,
+                    fontSize = 16.sp
+                ),
+                cursorBrush = SolidColor(MishColors.Cursor),
+                keyboardOptions = KeyboardOptions(keyboardType = keyboardType),
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+                decorationBox = { innerTextField ->
+                    Box {
+                        if (value.isEmpty()) {
+                            Text(
+                                text = placeholder,
+                                color = MishColors.TextHint,
+                                fontSize = 16.sp
+                            )
+                        }
+                        innerTextField()
+                    }
+                }
+            )
+        }
+    }
+}
+
+@Composable
+private fun ModernButton(
+    text: String,
+    enabled: Boolean = true,
+    onClick: () -> Unit
+) {
+    Surface(
+        onClick = onClick,
+        enabled = enabled,
+        shape = RoundedCornerShape(18.dp),
+        color = if (enabled) MishColors.Accent else MishColors.Accent.copy(alpha = 0.3f),
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(54.dp)
+            .shadow(8.dp, RoundedCornerShape(18.dp))
+    ) {
+        Box(contentAlignment = Alignment.Center) {
+            Text(
+                text = text,
+                color = Color.White,
+                fontSize = 16.sp,
+                fontWeight = FontWeight.SemiBold
+            )
+        }
     }
 }
 
@@ -276,10 +456,20 @@ private fun FlowRowRoles(roles: List<String>, selected: String, onSelect: (Strin
                     FilterChip(
                         selected = isSelected,
                         onClick = { onSelect(r) },
-                        label = { Text(r) },
+                        label = { Text(r, color = if (isSelected) Color.White else MishColors.TextSecondary) },
                         colors = FilterChipDefaults.filterChipColors(
-                            labelColor = if (isSelected) Color.White else MishColors.Muted,
-                            selectedContainerColor = MishColors.Accent
+                            containerColor = MishColors.GlassSurface,
+                            selectedContainerColor = MishColors.Accent,
+                            selectedLabelColor = Color.White
+                        ),
+                        border = FilterChipDefaults.filterChipBorder(
+                            enabled = true,
+                            selected = isSelected,
+                            borderColor = if (isSelected) MishColors.Accent
+                            else MishColors.GlassBorder,
+                            selectedBorderColor = MishColors.Accent,
+                            disabledBorderColor = MishColors.GlassBorder,
+                            disabledSelectedBorderColor = MishColors.GlassBorder
                         )
                     )
                 }
@@ -294,10 +484,19 @@ private fun GenderChip(value: String, selected: String, onSelect: (String) -> Un
     FilterChip(
         selected = isSelected,
         onClick = { onSelect(value) },
-        label = { Text(value.replaceFirstChar { it.uppercase() }) },
+        label = { Text(value.replaceFirstChar { it.uppercase() }, color = if (isSelected) Color.White else MishColors.TextSecondary) },
         colors = FilterChipDefaults.filterChipColors(
-            labelColor = if (isSelected) Color.White else MishColors.Muted,
-            selectedContainerColor = MishColors.Accent
+            containerColor = MishColors.GlassSurface,
+            selectedContainerColor = MishColors.Primary
+        ),
+        border = FilterChipDefaults.filterChipBorder(
+            enabled = true,
+            selected = isSelected,
+            borderColor = if (isSelected) MishColors.Primary
+            else MishColors.GlassBorder,
+            selectedBorderColor = MishColors.Primary,
+            disabledBorderColor = MishColors.GlassBorder,
+            disabledSelectedBorderColor = MishColors.GlassBorder
         )
     )
 }
@@ -307,8 +506,9 @@ private fun MishTheme(content: @Composable () -> Unit) {
     MaterialTheme(
         colorScheme = MaterialTheme.colorScheme.copy(
             background = MishColors.Background,
-            surface = MishColors.Surface,
-            primary = MishColors.Accent
+            surface = MishColors.BackgroundSoft,
+            primary = MishColors.Accent,
+            onSurface = MishColors.TextPrimary
         ),
         content = content
     )
